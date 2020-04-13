@@ -1,0 +1,13 @@
+*.pdf    binary
+*.eps    binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.bmp    binary
+*.xlsx   binary
+*.docx   binary
+*.svg    binary
+*.dia    binary
+*.wav    binary
+*.mex*   binary
+
