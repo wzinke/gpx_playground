@@ -10,6 +10,52 @@ knitr::opts_chunk$set(echo = TRUE)
 knitr::opts_knit$set(root.dir = getwd())
 ```
 
+# define parameters
+
+```{r}
+filename  = "Morning_Walk.gpx"
+act_typ   = 'w'
+lgnd_algn = 'bl'
+mapzoom   = 15
+mpsrc     = 'osm'
+mptyp     = 'terrain-background'
+
+# cleaning parameters
+if(act_typ == 'w'){
+  spdthr = 15  # km/h - threshold to identify track points that exceed the expected distance
+  sm_tm  = 2 # [minutes] - time window for loess smoothing
+  ResThr = 0.00005  # residual threshold after loess filtering
+}
+
+if(act_typ == 'r'){
+  spdthr = 50  # km/h - threshold to identify track points that exceed the expected distance
+  sm_tm  = 0.1 # [minutes] - time window for loess smoothing
+  ResThr = 0.00005  # residual threshold after loess filtering
+}
+
+# legend alignment
+if(lgnd_algn == 'bl'){
+  lgndpos  = c(.025, .025)
+  lgndjust = c("left", "bottom")
+}
+
+if(lgnd_algn == 'tl'){
+  lgndpos  = c(.025, .975)
+  lgndjust = c("left", "top")
+}
+
+if(lgnd_algn == 'br'){
+  lgndpos  = c(.975, .025)
+  lgndjust = c("right", "bottom")
+}
+
+if(lgnd_algn == 'tr'){
+  lgndpos  = c(.975, .975)
+  lgndjust = c("right", "top")
+}
+```
+
+
 Try to remove outliers from a gpx track and smooth the data.
 
 some inspirations came from these resources:
@@ -27,8 +73,8 @@ Load all packages required for the analysis. If these packages are not available
 #Pckglst  = c("ggplot2", "plotKML", "maptools", "XML", "rgdal", "chron", "spatstat",
 #             "dplyr", "purrr", "pgirmess")
 
-Pckglst  = c("ggplot2", "maptools", "XML", "rgdal", "spatstat",
-             "dplyr", "purrr", "sp")
+Pckglst  = c("ggplot2", "maptools", "XML", "rgdal", "spatstat", "png",
+             "dplyr", "purrr", "sp", "ggmap", "raster", "viridis")
 
 for(cPckg in Pckglst){
   if(!require(cPckg , character.only=TRUE)){
@@ -41,9 +87,37 @@ for(cPckg in Pckglst){
 
 # read in gpx file
 
+## define interpolation function
+
+```{r}
+Track_ip = function(trk,remark, smpldur=NULL){
+
+if(is.null(smpldur)){ smpldur  = round(median(diff(trk$Duration)), 10) }  
+  
+nDuration = seq(from=0, to=max(trk$Duration), by=smpldur)
+
+Lon_ip = approxfun(trk$Duration, trk$Longitude, rule=2)
+Lat_ip = approxfun(trk$Duration, trk$Latitude,  rule=2)
+Ele_ip = approxfun(trk$Duration, trk$Elevation, rule=2)
+
+nLon = Lon_ip(nDuration)
+nLat = Lat_ip(nDuration)
+nEle = Ele_ip(nDuration)
+
+Dist = c(0, spDists(x=cbind(nLon, nLat), longlat=TRUE, segments = TRUE) )
+Spd  = c(Dist / smpldur)   # km/h
+
+lTm = as.difftime(nDuration, units="hours") + trk$Time[1]
+
+trk_df = data.frame(Latitude=nLat, Longitude=nLon, Elevation=nEle, Time=lTm, 
+                   Duration=nDuration, Distance=Dist, Speed=Spd)
+return(trk_df)
+}
+
+```
+
 ```{r}
 # from https://stackoverflow.com/questions/36377252/import-gpx-track-using-the-xml-library
-filename = "EM_Lunch_Walk.gpx"
 
 gpx_dt <- filename %>%
   xmlTreeParse(useInternalNodes = TRUE) %>%
@@ -64,35 +138,59 @@ gpx_dt$Duration  = as.numeric(difftime(gpx_dt$Time, gpx_dt$Time[1]), units="hour
 
 Npts = length(gpx_dt$Longitude)
 sTm = gpx_dt$Time[1]
+smplitv = round(median(diff(gpx_dt$Duration)),8)
 ```
 
-# Determine Distance and Speed
-```{r}
-Dist     = spDists(x=cbind(gpx_dt$Longitude, gpx_dt$Latitude), longlat=TRUE, segments = TRUE) 
-interval = diff(gpx_dt$Duration)
-smpldur  = round(median(interval)/2, 10)
-
-Speed = c(0, Dist / interval)   # km/h
-```
 
 # identify outliers and create new gpx data
+
+
+
+## speed criterion
+
+```{r}
+gpx_cl = Track_ip(gpx_dt)
+
+Nol = 1
+while(Nol > 0){
+  
+  ol_p = which(gpx_cl$Speed > spdthr)
+  Nol  = length(ol_p)
+    
+  gpx_cl[ol_p, ] = NA
+
+  gpx_cl = droplevels(subset(gpx_cl, is.finite(gpx_cl$Longitude)))
+
+  gpx_cl = Track_ip(gpx_cl)
+}
+
+plot(gpx_dt$Longitude, gpx_dt$Latitude, type='l')
+lines(gpx_cl$Longitude, gpx_cl$Latitude, col='red')
+
+plot(gpx_dt$Duration, gpx_dt$Elevation, type='l')
+lines(gpx_cl$Duration, gpx_cl$Elevation, col='red')
+
+gpx_ip = Track_ip(gpx_cl, smpldur=smplitv/2)
+```
+
+
+## loess residuals
 
 ```{r}
 # running median residuals
 # rMed_win = 151 # window size of data points used for the running median
 #
-# rLat = gpx_dt$Latitude  - runmed(gpx_dt$Latitude,  rMed_win)
-# rLon = gpx_dt$Longitude - runmed(gpx_dt$Longitude, rMed_win)
+# rLat = gpx_ip$Latitude  - runmed(gpx_ip$Latitude,  rMed_win)
+# rLon = gpx_ip$Longitude - runmed(gpx_ip$Longitude, rMed_win)
 
 # loess residuals
-ResThr = 0.0001
-WinDur = 1 / 60 # loess Window duration in hours
+WinDur =   sm_tm / 60 # loess Window duration in hours (walking)
 
-NWinPts = WinDur/smpldur
-Lspan   = NWinPts / Npts
+NWinPts = WinDur/median(diff(gpx_ip$Duration))
+Lspan   = NWinPts / length(gpx_ip$Latitude)
 
-rLon = loess(gpx_dt$Latitude  ~ gpx_dt$Duration, span=Lspan)$residuals
-rLat = loess(gpx_dt$Longitude ~ gpx_dt$Duration, span=Lspan)$residuals
+rLon = loess(gpx_ip$Latitude  ~ gpx_ip$Duration, span=Lspan)$residuals
+rLat = loess(gpx_ip$Longitude ~ gpx_ip$Duration, span=Lspan)$residuals
 
 rDist = sqrt(rLat^2 + rLon^2)
 
@@ -101,48 +199,43 @@ rDist = sqrt(rLat^2 + rLon^2)
 # ol = which(rDist > 10*mad(rDist))
 ol = which(rDist > ResThr)
 
-gpx_ol_rm = gpx_dt
+gpx_ol_rm = gpx_ip
 gpx_ol_rm[ol, ] = NA
 
 gpx_ol_rm = droplevels(subset(gpx_ol_rm, is.finite(gpx_ol_rm$Longitude)))
-
-# define interpolation functions
-nDuration = seq(from=0, to=max(gpx_dt$Duration), by=smpldur)
-
-Lon_ip = approxfun(gpx_ol_rm$Duration, gpx_ol_rm$Longitude, rule=2)
-Lat_ip = approxfun(gpx_ol_rm$Duration, gpx_ol_rm$Latitude,  rule=2)
-Ele_ip = approxfun(gpx_ol_rm$Duration, gpx_ol_rm$Elevation, rule=2)
-
-nLon = Lon_ip(nDuration)
-nLat = Lat_ip(nDuration)
-nEle = Ele_ip(nDuration)
+gpx_ol_rm = Track_ip(gpx_ol_rm)
 
 # visualize
-plot(gpx_dt$Longitude, gpx_dt$Latitude)
-lines(nLon, nLat, col='red')
+plot(gpx_ip$Longitude, gpx_ip$Latitude, type='l')
+lines(gpx_ol_rm$Longitude, gpx_ol_rm$Latitude, col='red')
 
-plot(gpx_dt$Duration,gpx_dt$Elevation)
-lines(nDuration,nEle, col='red')
+plot(gpx_ip$Duration, gpx_ip$Elevation, type='l')
+lines(gpx_ol_rm$Duration, gpx_ol_rm$Elevation, col='red')
 ```
 
 # smooth the data
 ```{r}
-WinDur = 2 / 60 # loess Window duration in hours
+WinDur = sm_tm / 60 # loess Window duration in hours
 
-NWinPts = WinDur/smpldur
-Lspan = NWinPts / length(nDuration)
+gpx_sm = gpx_ol_rm
 
-lLon = loess(nLon ~ nDuration, span=Lspan)$fitted
-lLat = loess(nLat ~ nDuration, span=Lspan)$fitted
-lEle = loess(nEle ~ nDuration, span=Lspan)$fitted
+NWinPts = WinDur/median(diff(gpx_ol_rm$Duration))
+Lspan   = NWinPts / length(gpx_ol_rm$Latitude)
 
-plot(gpx_dt$Longitude, gpx_dt$Latitude)
-lines(nLon, nLat, col='red')
-lines(lLon, lLat, col='green')
+gpx_sm$Longitude = loess(Longitude ~ Duration, data=gpx_ol_rm ,span=Lspan)$fitted
+gpx_sm$Latitude  = loess(Latitude  ~ Duration, data=gpx_ol_rm, span=Lspan)$fitted
+gpx_sm$Elevation = loess(Elevation ~ Duration, data=gpx_ol_rm, span=Lspan)$fitted
 
-plot(gpx_dt$Duration,gpx_dt$Elevation)
-lines(nDuration,nEle, col='red')
-lines(nDuration,lEle, col='green')
+gpx_sm = Track_ip(gpx_sm)
+
+
+plot(gpx_dt$Longitude, gpx_dt$Latitude, type='l')
+lines(gpx_ol_rm$Longitude, gpx_ol_rm$Latitude, col='red')
+lines(gpx_sm$Longitude, gpx_sm$Latitude, col='green')
+
+plot(gpx_dt$Duration,gpx_dt$Elevation, type='l')
+lines(gpx_dt$Duration,gpx_dt$Elevation, col='red')
+lines(gpx_sm$Duration,gpx_sm$Elevation, col='green')
 ```
 
 # write processed GPX file
@@ -152,11 +245,11 @@ from:
 https://stackoverflow.com/questions/54726758/merging-multiple-gpx-files-into-a-single-gpx-file-with-multiple-tracks
 
 ```{r}
-writeGPX = function(Time, Longitude, Latitude, Elevation, file="file.gpx"){
+writeGPX = function(gpx_trk, file="file.gpx"){
   o = c('<gpx version="1.1" creator="R">','<trk>','<trkseg>')
-  o = c(o, paste('<trkpt lat="', Latitude,'" lon="', Longitude,'"><time>',
-           paste("<ele>", Elevation,"</ele>",sep=""),
-           paste(gsub(' ','T', as.character(Time)), 'Z', sep=''),
+  o = c(o, paste('<trkpt lat="', gpx_trk$Latitude,'" lon="', gpx_trk$Longitude,'"><time>',
+           paste("<ele>", gpx_trk$Elevation,"</ele>",sep=""),
+           paste(gsub(' ','T', as.character(gpx_trk$Time)), 'Z', sep=''),
            '</time></trkpt>', sep=''))
   
   o = c(o, '</trkseg>', '</trk>', '</gpx>')
@@ -166,41 +259,32 @@ writeGPX = function(Time, Longitude, Latitude, Elevation, file="file.gpx"){
 
 ## Write data
 ```{r}
-lTm = as.difftime(nDuration, units="hours") + sTm
 
-writeGPX(lTm, lLon, lLat, lEle, file="gpx_cleaned.gpx")
+writeGPX(gpx_sm, file="gpx_cleaned.gpx")
 ```
 
+# plot speed profile
 
-# just some plots to play with
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+# get the map
+bbox = make_bbox(gpx_sm$Longitude, gpx_sm$Latitude)
+b1   = get_map(bbox, maptype=mptyp, source=mpsrc, force=TRUE, zoom=mapzoom)
 
+ggmap(b1) + 
+  geom_point(data=gpx_sm, 
+             aes(Longitude, Latitude, col=Speed), size=1.5, alpha=0.5) +
+  scale_colour_viridis(option='inferno') + theme_void() + 
+  theme(legend.position=lgndpos, legend.justification=lgndjust,
+        legend.title = element_text(size=10),
+        legend.text  = element_text(size=8))
 
-```{r}
-#gpx_dt = readGPX(filename)
-#gpx_raw <- readOGR(dsn = filename)
-#pfile <- htmlTreeParse(filename, useInternalNodes = T)
+# get plot area instead of bbox
 
-gpx.raw = readGPS(i = "gpx", f = filename, type="w")
-(layers = ogrListLayers(filename))
-gp1 = readOGR(filename, layer=layers[5])
-gt1 = readOGR(filename, layer=layers[3])
+hgth = abs(diff(bbox[c(2,4)]))
+wdth = abs(diff(bbox[c(1,3)]))
+
+wdthscl = 10
+hgthscl = wdthscl * (hgth/wdth)
+
+ggsave('speedmap.png', width=wdthscl, height=hgthscl)
 ```
-
-
-```{r}
-plot(gp1)
-plot(gt1, add = T, col = "red")
-```
-
-```{r}
-plot(gp1$track_seg_point_id, gp1$ele )
-```
-
-```{r}
-gp1.ppp = as(SpatialPoints(gp1), "ppp")
-plot(density(gp1.ppp, adjust=0.5))
-plot(gt1, add = T, col = "green")
-```
-
-
-
