@@ -13,24 +13,36 @@ knitr::opts_knit$set(root.dir = getwd())
 # define parameters
 
 ```{r}
-filename  = "Morning_Walk.gpx"
-act_typ   = 'w'
-lgnd_algn = 'bl'
-mapzoom   = 15
-mpsrc     = 'osm'
-mptyp     = 'terrain-background'
+filename  = "Afternoon_Hike.gpx"
+act_typ   = 'w'  # cycling (c), running (r), walking/hiking (w)
+lgnd_algn = 'bl' # top-left (tl), top-right (tr), bottom-left (bl), bottom-right (br)
+mpsrc     = 'stamen'
+mptyp     = 'watercolor'
 
 # cleaning parameters
+
+### walking
 if(act_typ == 'w'){
-  spdthr = 15  # km/h - threshold to identify track points that exceed the expected distance
-  sm_tm  = 2 # [minutes] - time window for loess smoothing
-  ResThr = 0.00005  # residual threshold after loess filtering
+  spdthr   = 8  # km/h - threshold to identify track points that exceed the expected distance
+  sm_tm    = 1 # [minutes] - time window for loess smoothing
+  ResThr   = 0.00001  # residual threshold after loess filtering
+  mapzoom  = 14
 }
 
+### running
 if(act_typ == 'r'){
-  spdthr = 50  # km/h - threshold to identify track points that exceed the expected distance
-  sm_tm  = 0.1 # [minutes] - time window for loess smoothing
-  ResThr = 0.00005  # residual threshold after loess filtering
+  spdthr   = 15  # km/h - threshold to identify track points that exceed the expected distance
+  sm_tm    = 0.5 # [minutes] - time window for loess smoothing
+  ResThr   = 0.00005  # residual threshold after loess filtering
+  mapzoom  = 14
+}
+
+### cycling
+if(act_typ == 'c'){
+  spdthr   = 60  # km/h - threshold to identify track points that exceed the expected distance
+  sm_tm    = 0.5 # [minutes] - time window for loess smoothing
+  ResThr   = 0.00001  # residual threshold after loess filtering
+  mapzoom  = 13
 }
 
 # legend alignment
@@ -55,12 +67,12 @@ if(lgnd_algn == 'tr'){
 }
 ```
 
-
 Try to remove outliers from a gpx track and smooth the data.
 
 some inspirations came from these resources:
   * https://github.com/Robinlovelace/Creating-maps-in-R/blob/master/vignettes/gpx-files.Rmd
   * https://bookdown.org/robinlovelace/geocompr
+  * https://padpadpadpad.github.io/post/animate-your-strava-activities-using-rstrava-and-gganimate
   * https://rspatial.org/raster/spatial/index.html
   * https://www.r-bloggers.com/stay-on-track-plotting-gps-tracks-with-r
   * https://digital-geography.com/gpx-overview-r-function-create-overview-gpx-files-using-leaflet-rgooglemaps
@@ -74,7 +86,7 @@ Load all packages required for the analysis. If these packages are not available
 #             "dplyr", "purrr", "pgirmess")
 
 Pckglst  = c("ggplot2", "maptools", "XML", "rgdal", "spatstat", "png",
-             "dplyr", "purrr", "sp", "ggmap", "raster", "viridis")
+             "dplyr", "purrr", "sp", "ggmap", "raster", "viridis", "stringi")
 
 for(cPckg in Pckglst){
   if(!require(cPckg , character.only=TRUE)){
@@ -84,7 +96,6 @@ for(cPckg in Pckglst){
 }
 ``` 
 
-
 # read in gpx file
 
 ## define interpolation function
@@ -92,7 +103,7 @@ for(cPckg in Pckglst){
 ```{r}
 Track_ip = function(trk,remark, smpldur=NULL){
 
-if(is.null(smpldur)){ smpldur  = round(median(diff(trk$Duration)), 10) }  
+if(is.null(smpldur)){ smpldur = round(median(diff(trk$Duration)), 10) }
   
 nDuration = seq(from=0, to=max(trk$Duration), by=smpldur)
 
@@ -104,13 +115,17 @@ nLon = Lon_ip(nDuration)
 nLat = Lat_ip(nDuration)
 nEle = Ele_ip(nDuration)
 
-Dist = c(0, spDists(x=cbind(nLon, nLat), longlat=TRUE, segments = TRUE) )
+Dist = spDists(x=cbind(nLon, nLat), longlat=TRUE, segments=TRUE)
+Dist = c(0, sqrt(Dist^2 + (diff(nEle)/1000)^2) )
+
 Spd  = c(Dist / smpldur)   # km/h
+
+Range = cumsum(Dist)
 
 lTm = as.difftime(nDuration, units="hours") + trk$Time[1]
 
 trk_df = data.frame(Latitude=nLat, Longitude=nLon, Elevation=nEle, Time=lTm, 
-                   Duration=nDuration, Distance=Dist, Speed=Spd)
+                   Duration=nDuration, Distance=Dist, Speed=Spd, Range=Range)
 return(trk_df)
 }
 
@@ -119,7 +134,7 @@ return(trk_df)
 ```{r}
 # from https://stackoverflow.com/questions/36377252/import-gpx-track-using-the-xml-library
 
-gpx_dt <- filename %>%
+gpx_dt = filename %>%
   xmlTreeParse(useInternalNodes = TRUE) %>%
   xmlRoot %>%
   xmlToList %>%
@@ -191,9 +206,9 @@ Lspan   = NWinPts / length(gpx_ip$Latitude)
 
 rLon = loess(gpx_ip$Latitude  ~ gpx_ip$Duration, span=Lspan)$residuals
 rLat = loess(gpx_ip$Longitude ~ gpx_ip$Duration, span=Lspan)$residuals
+rEle = (loess(gpx_ip$Elevation ~ gpx_ip$Duration, span=Lspan)$residuals)/1000
 
-rDist = sqrt(rLat^2 + rLon^2)
-
+rDist = sqrt(rLat^2 + rLon^2 + rEle^2)
 # remove outliers
 
 # ol = which(rDist > 10*mad(rDist))
@@ -215,7 +230,7 @@ lines(gpx_ol_rm$Duration, gpx_ol_rm$Elevation, col='red')
 
 # smooth the data
 ```{r}
-WinDur = sm_tm / 60 # loess Window duration in hours
+WinDur = sm_tm / 120 # loess Window duration in hours
 
 gpx_sm = gpx_ol_rm
 
@@ -265,15 +280,21 @@ writeGPX(gpx_sm, file="gpx_cleaned.gpx")
 
 # plot speed profile
 
-```{r, message=FALSE, warning=FALSE, echo=FALSE}
+```{r}
 # get the map
 bbox = make_bbox(gpx_sm$Longitude, gpx_sm$Latitude)
 b1   = get_map(bbox, maptype=mptyp, source=mpsrc, force=TRUE, zoom=mapzoom)
 
+
+gpx_pl = gpx_sm
+
+mx_spd = quantile(gpx_pl$Speed, 0.99)
+gpx_pl$Speed[gpx_pl$Speed>mx_spd] = mx_spd
+
 ggmap(b1) + 
-  geom_point(data=gpx_sm, 
+  geom_point(data=gpx_pl, 
              aes(Longitude, Latitude, col=Speed), size=1.5, alpha=0.5) +
-  scale_colour_viridis(option='inferno') + theme_void() + 
+  scale_colour_viridis(option='inferno', limits = c(0, mx_spd)) + theme_void() + 
   theme(legend.position=lgndpos, legend.justification=lgndjust,
         legend.title = element_text(size=10),
         legend.text  = element_text(size=8))

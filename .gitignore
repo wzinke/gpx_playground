@@ -9,3 +9,7 @@
 
 octave-workspace
 .Rhistory
+
+*.gpx
+*.png
+*.pdf
